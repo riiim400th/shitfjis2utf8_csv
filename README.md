@@ -1,6 +1,11 @@
 
 csvファイルを一括でshiftjisからutf8に変換
 
+一括変換
 go run . <変換csvのあるディレクトリパス>
 
-find <ディレクトリ郡のあるパス> -type d -name "*_csv" -print0 | xargs -0 -I {} go run . {}
+再起的一括変換
+go run . -r <depth> <変換csvのあるディレクトリパス>
+
+ヘルプ
+go run . --help
