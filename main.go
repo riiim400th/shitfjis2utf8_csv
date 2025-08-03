@@ -34,7 +34,7 @@ func main() {
 	// 3. ファイルを一つずつ処理
 	for _, file := range files {
 		// ディレクトリは無視し、拡張子が.csvのファイルのみを対象とする
-		if file.IsDir() || filepath.Ext(file.Name()) != ".csv" {
+		if file.IsDir() || !(filepath.Ext(file.Name()) == ".csv" || filepath.Ext(file.Name()) == ".txt") {
 			continue
 		}
 
