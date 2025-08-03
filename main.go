@@ -1,84 +1,155 @@
 package main
 
 import (
-	"fmt"
-	"io"
-	"log"
-	"os"
-	"path/filepath"
+    "flag"
+    "fmt"
+    "io"
+    "log"
+    "os"
+    "path/filepath"
+    "unicode/utf8"
 
-	"golang.org/x/text/encoding/japanese"
-	"golang.org/x/text/transform"
+    "golang.org/x/text/encoding/japanese"
+    "golang.org/x/text/transform"
 )
 
 func main() {
-	// 1. コマンドライン引数から対象ディレクトリを取得
-	if len(os.Args) < 2 {
-		fmt.Println("エラー: 変換対象のフォルダパスを指定してください。")
-		fmt.Printf("使い方: go run %s <フォルダのパス>\n", os.Args[0])
-		return
-	}
-	targetDir := os.Args[1]
+    flag.Usage = func() {
+        fmt.Fprintf(os.Stderr, `使い方: %s [-r <depth>] <フォルダのパス>
 
-	// 2. ディレクトリ内のファイル一覧を取得
-	files, err := os.ReadDir(targetDir)
-	if err != nil {
-		log.Fatalf("FATAL: フォルダの読み込みに失敗しました: %v", err)
-	}
+オプション:
+  -r <depth>    再帰的に探索する深さ（0なら再帰しない）
+  -h, --help    このヘルプを表示
 
-	fmt.Printf("📁 処理対象フォルダ: %s\n", targetDir)
-	fmt.Println("---------------------------------")
+`, os.Args[0])
+    }
+    var recursiveDepth int
+    flag.IntVar(&recursiveDepth, "r", 0, "再帰的に探索する深さ（0なら再帰しない）")
+    flag.Parse()
 
-	convertedCount := 0
+    if flag.NArg() < 1 {
+        flag.Usage()
+        return
+    }
+    targetDir := flag.Arg(0)
 
-	// 3. ファイルを一つずつ処理
-	for _, file := range files {
-		// ディレクトリは無視し、拡張子が.csvのファイルのみを対象とする
-		if file.IsDir() || !(filepath.Ext(file.Name()) == ".csv" || filepath.Ext(file.Name()) == ".txt") {
-			continue
-		}
+    fmt.Printf("📁 処理対象フォルダ: %s\n", targetDir)
+    fmt.Println("---------------------------------")
 
-		filePath := filepath.Join(targetDir, file.Name())
+    convertedCount := 0
 
-		// 4. Shift-JISからUTF-8への変換処理
-		err := convertFileToUTF8(filePath)
-		if err != nil {
-			log.Printf("❌ 変換失敗: %s - %v\n", file.Name(), err)
-			continue // エラーが発生しても次のファイルの処理を続ける
-		}
+    // ファイル探索
+    var walkFn filepath.WalkFunc = func(path string, info os.FileInfo, err error) error {
+        if err != nil {
+            log.Printf("❌ ファイルアクセス失敗: %s - %v\n", path, err)
+            return nil
+        }
+        if info.IsDir() {
+            // 深さ制限
+            if recursiveDepth > 0 {
+                rel, _ := filepath.Rel(targetDir, path)
+                if rel != "." && len(filepath.SplitList(rel)) > recursiveDepth {
+                    return filepath.SkipDir
+                }
+            }
+            return nil
+        }
+        ext := filepath.Ext(info.Name())
+        if ext != ".csv" && ext != ".txt" {
+            return nil
+        }
 
-		fmt.Printf("✅ 変換成功: %s\n", file.Name())
-		convertedCount++
-	}
+        // UTF-8判定
+        isUTF8, err := isFileUTF8(path)
+        if err != nil {
+            log.Printf("❌ 判定失敗: %s - %v\n", info.Name(), err)
+            return nil
+        }
+        if isUTF8 {
+            fmt.Printf("🟦 既にUTF-8: %s\n", info.Name())
+            return nil
+        }
 
-	fmt.Println("---------------------------------")
-	fmt.Printf("✨ 処理完了！ %d個のCSVファイルをUTF-8に変換しました。\n", convertedCount)
+        // Shift-JIS判定（簡易: UTF-8でなければShift-JISとみなす）
+        err = convertFileToUTF8(path)
+        if err != nil {
+            log.Printf("❌ 変換失敗: %s - %v\n", info.Name(), err)
+            return nil
+        }
+        fmt.Printf("✅ 変換成功: %s\n", info.Name())
+        convertedCount++
+        return nil
+    }
+
+    if recursiveDepth > 0 {
+        filepath.Walk(targetDir, walkFn)
+    } else {
+        files, err := os.ReadDir(targetDir)
+        if err != nil {
+            log.Fatalf("FATAL: フォルダの読み込みに失敗しました: %v", err)
+        }
+        for _, file := range files {
+            if file.IsDir() {
+                continue
+            }
+            ext := filepath.Ext(file.Name())
+            if ext != ".csv" && ext != ".txt" {
+                continue
+            }
+            filePath := filepath.Join(targetDir, file.Name())
+            isUTF8, err := isFileUTF8(filePath)
+            if err != nil {
+                log.Printf("❌ 判定失敗: %s - %v\n", file.Name(), err)
+                continue
+            }
+            if isUTF8 {
+                fmt.Printf("🟦 既にUTF-8: %s\n", file.Name())
+                continue
+            }
+            err = convertFileToUTF8(filePath)
+            if err != nil {
+                log.Printf("❌ 変換失敗: %s - %v\n", file.Name(), err)
+                continue
+            }
+            fmt.Printf("✅ 変換成功: %s\n", file.Name())
+            convertedCount++
+        }
+    }
+
+    fmt.Println("---------------------------------")
+    fmt.Printf("✨ 処理完了！ %d個のファイルをUTF-8に変換しました。\n", convertedCount)
 }
 
-// convertFileToUTF8 は指定されたファイルの文字コードをShift-JISからUTF-8に変換して上書き保存します。
+// ファイルがUTF-8か判定
+func isFileUTF8(filePath string) (bool, error) {
+    f, err := os.Open(filePath)
+    if err != nil {
+        return false, err
+    }
+    defer f.Close()
+    buf := make([]byte, 4096)
+    n, err := f.Read(buf)
+    if err != nil && err != io.EOF {
+        return false, err
+    }
+    return utf8.Valid(buf[:n]), nil
+}
+
+// Shift-JISからUTF-8に変換
 func convertFileToUTF8(filePath string) error {
-	// Shift-JISとしてファイルを開く
-	file, err := os.Open(filePath)
-	if err != nil {
-		return fmt.Errorf("ファイルを開けませんでした: %w", err)
-	}
-	defer file.Close()
-
-	// Shift-JISからUTF-8に変換するリーダーを作成
-	reader := transform.NewReader(file, japanese.ShiftJIS.NewDecoder())
-
-	// 変換後のUTF-8データをすべて読み込む
-	utf8Bytes, err := io.ReadAll(reader)
-	if err != nil {
-		return fmt.Errorf("文字コードの変換に失敗しました: %w", err)
-	}
-
-	// 元のファイルにUTF-8として上書き保存する
-	// ファイルパーミッションは元のファイルを読み取るため0644（所有者に読み書き、その他に読み取り）を指定
-	err = os.WriteFile(filePath, utf8Bytes, 0644)
-	if err != nil {
-		return fmt.Errorf("ファイルの書き込みに失敗しました: %w", err)
-	}
-
-	return nil
+    file, err := os.Open(filePath)
+    if err != nil {
+        return fmt.Errorf("ファイルを開けませんでした: %w", err)
+    }
+    defer file.Close()
+    reader := transform.NewReader(file, japanese.ShiftJIS.NewDecoder())
+    utf8Bytes, err := io.ReadAll(reader)
+    if err != nil {
+        return fmt.Errorf("文字コードの変換に失敗しました: %w", err)
+    }
+    err = os.WriteFile(filePath, utf8Bytes, 0644)
+    if err != nil {
+        return fmt.Errorf("ファイルの書き込みに失敗しました: %w", err)
+    }
+    return nil
 }
